@@ -55,12 +55,15 @@ MOMENTUM_CONSECUTIVE_UP = 2  # 连续涨2轮即可触发（快速验证模式）
 #   'peak_price': float,      # 历史最高价
 #   'peak_ts': float,         # 峰值时间
 #   'last_check_ts': float,   # 上次检查时间
-#   'report_count': int,      # 已推送汇报次数
+#   'report_count': int,      # 已推送30min汇报次数
+#   'last_mid_push_ts': float,# 上次30min推送时间（用于防重复）
+#   'last_mid_pct': float,    # 上次推送时的涨幅%
 # }}
 PUSH_TRACKER = {}
 LAST_SUMMARY_TS = 0  # 上次汇总推送时间
 SUMMARY_INTERVAL = 7200  # 2小时汇总一次（秒）
 MID_CHECK_INTERVAL = 1800  # 30分钟中间检查（秒）
+MID_PUSH_THRESHOLD = 0.50  # 30min汇报阈值：涨50%触发
 
 # 从.env读取TG配置
 def load_env():
@@ -188,6 +191,47 @@ CELEBRITY_VIRAL_PATTERNS = [
     r'\betf\b', r'\bhalving\b', r'\bmrbeast\b',
     r'\bsnoop\b', r'\bkanye\b', r'\bdrake\b',
 ]
+
+# ============================================================
+# 机器人刷量检测
+# ============================================================
+def detect_bot_pump(token):
+    """
+    检测机器人刷量盘子
+    核心特征：
+    1. 买卖比极端（buy/sell > 20）
+    2. holders几乎不涨但交易笔数很多（人均交易笔数异常高）
+    满足1+2即标记，3作为辅助参考
+    返回: (is_bot: bool, reason: str)
+    """
+    buys = token.get('buys_1h', 0) or token.get('buys', 0) or 0
+    sells = token.get('sells_1h', 0) or token.get('sells', 0) or 0
+    holders = token.get('holders', 0) or 0
+    volume = token.get('volume', 0) or 0
+    total_txs = buys + sells
+
+    # 条件1：买卖比极端
+    buy_sell_ratio = buys / max(sells, 1)
+    is_extreme_buy_ratio = buy_sell_ratio > 20
+
+    # 条件2：人均交易笔数异常高（刷单机器人特征）
+    estimated_increment = max(holders * 0.1, 2)
+    tx_per_holder = total_txs / max(estimated_increment, 1)
+    is_bot_tx_pattern = is_extreme_buy_ratio and tx_per_holder > 15
+
+    # 条件3：单笔平均金额极低（辅助）
+    avg_tx_usd = volume / max(total_txs, 1)
+    is_micro_tx = avg_tx_usd < 3 and volume > 0
+
+    if is_bot_tx_pattern:
+        reason = f"🤖机器人: 买卖{buy_sell_ratio:.0f}:1 + 均{tx_per_holder:.0f}笔/人"
+        return True, reason
+    if is_extreme_buy_ratio and is_micro_tx and total_txs > 50:
+        reason = f"🤖可疑: 买卖{buy_sell_ratio:.0f}:1 + 均额${avg_tx_usd:.1f}"
+        return True, reason
+
+    return False, ""
+
 
 # ============================================================
 # 通用垃圾词（过滤明显的骗局/低质量币）
@@ -937,8 +981,8 @@ def format_flap_alert(token, desc_info=None):
     msg = f"{chain_emoji} BSC  {star_str}  FLAP低吸信号\n\n"
     msg += f"◈ {token['name']}  ({token['symbol']})\n"
     addr = token['address']
-    msg += f"🔗 https://dexscreener.com/bsc/{addr}\n"
-    msg += f"📈 https://gmgn.ai/bsc/token/{addr}\n\n"
+    gmgn_url = f"https://gmgn.ai/bsc/token/{addr}"
+    msg += f"📈 GMGN: {gmgn_url}\n\n"
 
     mc_str = _fmt_k(token['mc'])
     liq_str = _fmt_k(token['liq'])
@@ -974,9 +1018,8 @@ def format_musk_trump_alert(token, matched_kw, desc_info=None):
     msg = f"{chain_emoji} {ch}  ⭐⭐⭐  马斯克/川普概念\n\n"
     msg += f"◈ {token['name']}  ({token['symbol']})\n"
     addr = token['address']
-    chain_url = {'sol': 'solana', 'eth': 'ethereum', 'bsc': 'bsc', 'base': 'base'}.get(token['chain'], token['chain'])
-    msg += f"🔗 https://dexscreener.com/{chain_url}/{addr}\n"
-    msg += f"📈 https://gmgn.ai/{token['chain']}/token/{addr}\n\n"
+    gmgn_url = f"https://gmgn.ai/{token['chain']}/token/{addr}"
+    msg += f"📈 GMGN: {gmgn_url}\n\n"
 
     mc_str = _fmt_k(token['mc'])
     liq_str = _fmt_k(token['liq'])
@@ -1007,8 +1050,8 @@ def format_binance_cz_alert(token, matched_kw, desc_info=None):
     msg = f"🟡 BSC  ⭐⭐⭐  币安/CZ概念\n\n"
     msg += f"◈ {token['name']}  ({token['symbol']})\n"
     addr = token['address']
-    msg += f"🔗 https://dexscreener.com/bsc/{addr}\n"
-    msg += f"📈 https://gmgn.ai/bsc/token/{addr}\n\n"
+    gmgn_url = f"https://gmgn.ai/bsc/token/{addr}"
+    msg += f"📈 GMGN: {gmgn_url}\n\n"
 
     mc_str = _fmt_k(token['mc'])
     liq_str = _fmt_k(token['liq'])
@@ -1046,9 +1089,8 @@ def format_heating_narrative_alert(token, theme, count, desc_info=None):
     msg = f"{chain_emoji} {ch}  ⭐⭐  叙事热点 · 同主题{count}个币\n\n"
     msg += f"◈ {token['name']}  ({token['symbol']})\n"
     addr = token['address']
-    chain_url = {'sol': 'solana', 'eth': 'ethereum', 'bsc': 'bsc', 'base': 'base'}.get(token['chain'], token['chain'])
-    msg += f"🔗 https://dexscreener.com/{chain_url}/{addr}\n"
-    msg += f"📈 https://gmgn.ai/{token['chain']}/token/{addr}\n\n"
+    gmgn_url = f"https://gmgn.ai/{token['chain']}/token/{addr}"
+    msg += f"📈 GMGN: {gmgn_url}\n\n"
 
     mc_str = _fmt_k(token['mc'])
     liq_str = _fmt_k(token['liq'])
@@ -1197,7 +1239,12 @@ def track_momentum(tokens):
         safety = check_token_safety(token['chain'], addr)
         if not safety.get('safe'):
             continue
-        
+
+        # 机器人刷量检测
+        is_bot, bot_reason = detect_bot_pump(token)
+        if is_bot:
+            continue  # 不推机器人盘
+
         # 叙事分类 → 星级评分
         category, matched_kw = classify_narrative(token['name'], token['symbol'], token['chain'])
         is_flap = token.get('launchpad') == 'flap'
@@ -1280,6 +1327,8 @@ def track_momentum(tokens):
                 'peak_ts': now,
                 'last_check_ts': now,
                 'report_count': 0,
+                'last_mid_push_ts': 0,
+                'last_mid_pct': 0,
             }
 
         log(f"[动量信号{signal_count}] {token['name']} ({token['symbol']}) on {token['chain']} — 连涨{len(recent)}轮 +{pct_gain:.1f}%")
@@ -1299,47 +1348,37 @@ def format_momentum_alert(token, pct_gain, rounds, vol_up, stars, narrative_tag,
     """
     动量推送 — 简洁专业风格：
     1. 顶部一行：链 + 星级 + 连涨信息
-    2. 代币名 + 合约（可点链接）
+    2. 代币名 + Symbol
     3. 核心数据（MC / 流动性 / 1h / 持有人）
     4. 叙事标签 + 描述（如有）
-    5. 直达链接
+    5. 直达链接（仅GMGN）
     """
     chain_map = {'sol': 'SOL', 'eth': 'ETH', 'bsc': 'BSC', 'base': 'BASE'}
     ch = chain_map.get(token['chain'], token['chain'].upper())
 
-    # 链标识
     chain_emoji = {'sol': '🔸', 'eth': '🔷', 'bsc': '🟡', 'base': '🔵'}.get(token['chain'], '●')
     star_str = "⭐" * stars
     vol_tag = "📊" if vol_up else ""
-    chain_tag = f"{chain_emoji} {ch}"
 
-    # === 顶部一行：链 | 星级 | 连涨轮数 ===
-    top_line = f"{chain_tag}  {star_str}  🚀连涨{rounds}轮 · +{pct_gain:.1f}% {vol_tag}"
+    # 顶部一行
+    top_line = f"{chain_emoji} {ch}  {star_str}  🚀连涨{rounds}轮 +{pct_gain:.1f}% {vol_tag}"
     msg = top_line + "\n\n"
 
-    # === 代币名 + Symbol ===
     name = token['name']
     sym = token['symbol']
     msg += f"◈ {name}  ({sym})\n"
 
-    # === 合约地址（行内格式）===
+    # 仅GMGN链接
     addr = token['address']
-    # DexScreener 直链
-    chain_url = {'sol': 'solana', 'eth': 'ethereum', 'bsc': 'bsc', 'base': 'base'}.get(token['chain'], token['chain'])
-    ds_link = f"https://dexscreener.com/{chain_url}/{addr}"
-    gmgn_link = f"https://gmgn.ai/sol/token/{addr}" if token['chain'] == 'sol' else f"https://gmgn.ai/{token['chain']}/token/{addr}"
-    msg += f"🔗 {ds_link}\n"
-    msg += f"📈 {gmgn_link}\n\n"
+    gmgn_url = (f"https://gmgn.ai/sol/token/{addr}"
+                 if token['chain'] == 'sol'
+                 else f"https://gmgn.ai/{token['chain']}/token/{addr}")
+    msg += f"📈 GMGN: {gmgn_url}\n\n"
 
-    # === 核心数据：市值 / 流动性 / 1h / 持有人 ===
-    # 格式化大数字
     def fmt_k(v):
-        if v >= 1_000_000:
-            return f"${v/1_000_000:.1f}M"
-        elif v >= 1_000:
-            return f"${v/1_000:.0f}K"
-        else:
-            return f"${v:.0f}"
+        if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
+        elif v >= 1_000: return f"${v/1_000:.0f}K"
+        else: return f"${v:.0f}"
 
     mc_str = fmt_k(token['mc'])
     liq_str = fmt_k(token['liq'])
@@ -1348,17 +1387,15 @@ def format_momentum_alert(token, pct_gain, rounds, vol_up, stars, narrative_tag,
     holders_str = f"{holders:,}" if holders else "—"
     age_str = f"{token['age_h']:.1f}h"
 
-    # 一行数据，用分隔符
     msg += f"市值 {mc_str}  ·  流动性 {liq_str}  ·  1h {chg_str}\n"
     msg += f"持有人 {holders_str}  ·  币龄 {age_str}\n\n"
 
-    # === 叙事标签 ===
+    # 叙事标签
     if narrative_tag and narrative_tag not in ('无明确叙事',):
-        # 清理星级标签避免重复
         clean_tag = narrative_tag.replace('★', '⭐').replace('☆', '')
         msg += f"🏷️ {clean_tag}\n\n"
 
-    # === 故事描述（有的话，简短）===
+    # 故事描述
     desc = (desc_info or {}).get('description', '')
     if desc:
         desc = desc.strip()
@@ -1366,7 +1403,7 @@ def format_momentum_alert(token, pct_gain, rounds, vol_up, stars, narrative_tag,
             desc = desc[:120] + '…'
         msg += f"💬 {desc}\n\n"
 
-    # === 社交链接（有的话）===
+    # 社交链接
     links = []
     twitter = (desc_info or {}).get('twitter', '')
     telegram = (desc_info or {}).get('telegram', '')
@@ -1376,7 +1413,6 @@ def format_momentum_alert(token, pct_gain, rounds, vol_up, stars, narrative_tag,
     if telegram:
         links.append(f"💬 {telegram}")
     if website:
-        # 简化website显示
         web_short = website.replace('https://', '').replace('http://', '').split('/')[0]
         links.append(f"🌐 {web_short}")
     if links:
@@ -1391,9 +1427,8 @@ def format_celebrity_alert(token, matched_kw, desc_info=None):
     msg = f"{chain_emoji} {ch}  ⭐⭐  名人/热点\n\n"
     msg += f"◈ {token['name']}  ({token['symbol']})\n"
     addr = token['address']
-    chain_url = {'sol': 'solana', 'eth': 'ethereum', 'bsc': 'bsc', 'base': 'base'}.get(token['chain'], token['chain'])
-    msg += f"🔗 https://dexscreener.com/{chain_url}/{addr}\n"
-    msg += f"📈 https://gmgn.ai/{token['chain']}/token/{addr}\n\n"
+    gmgn_url = f"https://gmgn.ai/{token['chain']}/token/{addr}"
+    msg += f"📈 GMGN: {gmgn_url}\n\n"
 
     mc_str = _fmt_k(token['mc'])
     liq_str = _fmt_k(token['liq'])
@@ -1500,112 +1535,128 @@ def check_signal_tracking(tokens_by_addr, force_summary=False):
     """
     每轮扫描后调用：
     1. 更新 PUSH_TRACKER 中每个已推送币的当前市值/价格，更新峰值
-    2. 30分钟中间检查：peak更新时发送中间汇报
-    3. 2小时汇总：全面汇报所有跟踪币的表现
+    2. 30分钟检查：从init_mc算起涨50%触发推送（跌不推）
+    3. 2小时汇总：展示 init_mc → current_mc → pnl（从进入时刻算起）
 
     tokens_by_addr: {address: token_dict} 当前轮次的币数据
     """
     global PUSH_TRACKER, LAST_SUMMARY_TS
     now = time.time()
-    changed_peaks = []  # [(addr, old_peak_mc, new_peak_mc, mc_mult), ...]
 
+    def _fk(v):
+        if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
+        elif v >= 1_000: return f"${v/1_000:.0f}K"
+        else: return f"${v:.0f}"
+    def _fa(v):
+        if abs(v) >= 1_000_000: return f"+${v/1_000_000:.1f}M" if v > 0 else f"-${abs(v)/1_000_000:.1f}M"
+        elif abs(v) >= 1_000: return f"+${v/1_000:.0f}K" if v > 0 else f"-${abs(v)/1_000:.0f}K"
+        else: return f"+${v:.0f}" if v > 0 else f"-${abs(v):.0f}"
+
+    # === 更新峰值 ===
     for addr, record in list(PUSH_TRACKER.items()):
         token = tokens_by_addr.get(addr)
         current_mc = token['mc'] if token else 0
         current_price = token.get('price', 0) if token else 0
-
-        # 更新峰值
         if current_mc > record['peak_mc']:
-            old_peak = record['peak_mc']
             record['peak_mc'] = current_mc
             record['peak_ts'] = now
             if record['init_price'] > 0 and current_price > 0:
                 record['peak_price'] = current_price
-            changed_peaks.append((addr, old_peak, current_mc,
-                                  current_mc / record['init_mc'] if record['init_mc'] > 0 else 0))
-
         record['last_check_ts'] = now
 
-    # === 30分钟中间检查：peak更新时推中间汇报 ===
-    for addr, old_peak, new_peak, mc_mult in changed_peaks:
-        record = PUSH_TRACKER[addr]
+    # === 30分钟中间检查：涨50%触发（跌不推）===
+    for addr, record in list(PUSH_TRACKER.items()):
+        token = tokens_by_addr.get(addr)
+        current_mc = token['mc'] if token else 0
         elapsed_min = (now - record['push_ts']) / 60
-        # 只在持有个币超过10分钟，且peak刷新了才通知
-        if elapsed_min >= 10 and record['report_count'] < 3:
-            mc_pct = (mc_mult - 1) * 100
-            emoji = "🚀" if mc_pct > 20 else "📈" if mc_pct > 0 else "📉"
-            chain_emoji = {'sol': '🔸', 'eth': '🔷', 'bsc': '🟡', 'base': '🔵'}.get(record['chain'], '●')
-            def _fk(v):
-                if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
-                elif v >= 1_000: return f"${v/1_000:.0f}K"
-                else: return f"${v:.0f}"
-            old_str = _fk(old_peak)
-            new_str = _fk(new_peak)
-            mult_str = f"{mc_mult:.2f}x"
-            msg = (
-                f"{emoji} 信号更新  {chain_emoji} {record['name']} ({record['symbol']})\n"
-                f"持仓 {elapsed_min:.0f}min  ·  Peak刷新\n"
-                f"初始 {old_str} → Peak {new_str}  {mult_str} ({mc_pct:+.1f}%)\n"
-                f"🔗 https://dexscreener.com/{record['chain']}/{addr}"
-            )
-            tg_send(msg)
-            record['report_count'] += 1
-            time.sleep(0.5)
+
+        if elapsed_min < 30:
+            continue
+
+        if record['init_mc'] > 0 and current_mc > 0:
+            current_pct = (current_mc - record['init_mc']) / record['init_mc']
+
+            # 涨幅>=50% 且 比上次推送再涨了>=10% 才推，最多推3次
+            if (current_pct >= MID_PUSH_THRESHOLD and
+                (current_pct - record.get('last_mid_pct', 0)) >= 0.10 and
+                record['report_count'] < 3):
+                mc_change = current_mc - record['init_mc']
+                emoji = "🚀"
+                chain_emoji = {'sol': '🔸', 'eth': '🔷', 'bsc': '🟡', 'base': '🔵'}.get(record['chain'], '●')
+                gmgn_url = (f"https://gmgn.ai/{record['chain']}/token/{addr}"
+                           if record['chain'] != 'sol'
+                           else f"https://gmgn.ai/sol/token/{addr}")
+                msg = (
+                    f"{emoji} 信号加速  {chain_emoji} {record['name']} ({record['symbol']})\n\n"
+                    f"持仓 {elapsed_min:.0f}min  ·  从初始市值 +{current_pct*100:.0f}%\n"
+                    f"初始 {_fk(record['init_mc'])} → 当前 {_fk(current_mc)}  "
+                    f"{_fa(mc_change)}\n"
+                    f"📈 GMGN: {gmgn_url}"
+                )
+                tg_send(msg)
+                record['report_count'] += 1
+                record['last_mid_push_ts'] = now
+                record['last_mid_pct'] = current_pct
+                time.sleep(0.5)
 
     # === 2小时汇总推送 ===
     if force_summary or (now - LAST_SUMMARY_TS) >= SUMMARY_INTERVAL:
         LAST_SUMMARY_TS = now
-        if not PUSH_TRACKER:
-            return
 
         active = [(addr, r) for addr, r in PUSH_TRACKER.items()
-                  if now - r['push_ts'] < 86400]  # 24小时内的
+                  if now - r['push_ts'] < 86400]
 
         if not active:
+            tg_send("📊 2h信号汇总\n过去2小时无有效信号，继续监控中...")
             return
 
         active.sort(key=lambda x: x[1]['peak_mc'] / x[1]['init_mc'] if x[1]['init_mc'] > 0 else 0, reverse=True)
-
-        def _fk(v):
-            if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
-            elif v >= 1_000: return f"${v/1_000:.0f}K"
-            else: return f"${v:.0f}"
 
         winners = []
         losers = []
 
         for addr, r in active:
-            mc_mult = r['peak_mc'] / r['init_mc'] if r['init_mc'] > 0 else 0
-            mc_pct = (mc_mult - 1) * 100
+            token = tokens_by_addr.get(addr)
+            current_mc = token['mc'] if token else r['peak_mc']
+            init_mc = r['init_mc']
+            mc_change = current_mc - init_mc
+            mc_pct = ((current_mc / init_mc) - 1) * 100 if init_mc > 0 else 0
             elapsed_h = (now - r['push_ts']) / 3600
             age_tag = f"{elapsed_h:.1f}h"
             chain_emoji = {'sol': '🔸', 'eth': '🔷', 'bsc': '🟡', 'base': '🔵'}.get(r['chain'], '●')
 
             if mc_pct > 0:
-                winners.append((r['name'], r['symbol'], r['chain'], chain_emoji, mc_mult, mc_pct, age_tag, addr))
+                winners.append((r['name'], r['symbol'], chain_emoji, init_mc, current_mc, mc_change, mc_pct, age_tag))
             else:
-                losers.append((r['name'], r['symbol'], r['chain'], chain_emoji, mc_mult, mc_pct, age_tag, addr))
+                losers.append((r['name'], r['symbol'], chain_emoji, init_mc, current_mc, mc_change, mc_pct, age_tag))
 
-        lines = [f"📊 信号汇总 — 过去2小时  ·  跟踪{len(active)}个\n"]
+        lines = [f"📊 2h信号汇总 — 跟踪{len(active)}个\n"]
 
         if winners:
             lines.append(f"\n🚀 盈利  ({len(winners)})\n")
-            for name, sym, chain, ce, mult, pct, age, addr in winners[:8]:
-                lines.append(f"{ce} {name}({sym})  {mult:.2f}x ({pct:+.1f}%)  {age}")
+            for name, sym, ce, init, curr, change, pct, age in winners[:8]:
+                lines.append(
+                    f"{ce} {name}  初始{_fk(init)} → 当前{_fk(curr)}  "
+                    f"{_fa(change)} ({pct:+.0f}%)  {age}"
+                )
             lines.append("")
 
         if losers:
             lines.append(f"\n📉 保本/亏损  ({len(losers)})\n")
-            for name, sym, chain, ce, mult, pct, age, addr in losers[:5]:
-                lines.append(f"{ce} {name}({sym})  {mult:.2f}x ({pct:+.1f}%)  {age}")
+            for name, sym, ce, init, curr, change, pct, age in losers[:5]:
+                lines.append(
+                    f"{ce} {name}  初始{_fk(init)} → 当前{_fk(curr)}  "
+                    f"{_fa(change)} ({pct:+.0f}%)  {age}"
+                )
 
-        lines.append(f"\n详细: https://dexscreener.com")
         tg_send("\n".join(lines))
 
         # 清理过时的跟踪记录（推送超过24小时的）
         for addr in list(PUSH_TRACKER.keys()):
             if now - PUSH_TRACKER[addr]['push_ts'] >= 86400:
                 del PUSH_TRACKER[addr]
+
+
 
 
 # ============================================================
@@ -1631,7 +1682,8 @@ def main():
         "★★ 名人热点 | FLAP无社区 | 有叙事\n"
         "★ 无明确叙事\n\n"
         f"扫描频率: 每{SCAN_INTERVAL}秒\n"
-        "信号跟踪: 30min中间Peak更新 | 2h汇总"
+        "机器人盘过滤: 买卖比+人均笔数\n"
+        "信号跟踪: 涨50%触发加速推送 | 2h汇总(init→当前pnl)"
     )
 
     scan_count = 0
