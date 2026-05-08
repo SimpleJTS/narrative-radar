@@ -40,7 +40,8 @@ ENABLED_CHAINS = ['sol']  # 只推SOL，测试完成后把 'eth','bsc','base' �
 # {address: [{'ts': timestamp, 'mc': market_cap, 'vol': volume, 'price': price}, ...]}
 MOMENTUM_TRACKER = {}
 MOMENTUM_PUSHED = {}  # {address: {'count': N, 'last_ts': ts, 'last_mc': mc}} 推送计数
-MOMENTUM_CONSECUTIVE_UP = 2  # 连续涨2轮即可触发（快速验证模式）
+MOMENTUM_CONSECUTIVE_UP = 2  # 连续涨2轮即可触发
+MIN_KOL_COUNT = 2  # KOL买入门槛：≥2个KOL才推送
 
 # ============================================================
 # 信号跟踪器 — 记录每个推送币的初始状态，持续跟踪最大涨幅
@@ -89,6 +90,71 @@ GMGN_HEADERS = {
     'apikey': 'gmgn_9837755ef6632402b4947b5e21ad50eb',
 }
 
+XXYY_API_KEY = os.environ.get('XXYY_API_KEY', '')
+XXYY_BASE = 'https://www.xxyy.io'
+
+def xxyy_get(endpoint, params=None):
+    """调用XXYY API，GET请求"""
+    if not XXYY_API_KEY:
+        return {}
+    try:
+        resp = requests.get(f'{XXYY_BASE}{endpoint}', headers={
+            'Authorization': f'Bearer {XXYY_API_KEY}',
+            'Accept': 'application/json',
+        }, params=params, timeout=10)
+        if resp.status_code == 200:
+            d = resp.json()
+            if d.get('code') == 200:
+                return d.get('data', {}) or {}
+    except:
+        pass
+    return {}
+
+def xxyy_post(endpoint, params=None, json_body=None):
+    """调用XXYY API，POST请求"""
+    if not XXYY_API_KEY:
+        return {}
+    try:
+        resp = requests.post(f'{XXYY_BASE}{endpoint}', headers={
+            'Authorization': f'Bearer {XXYY_API_KEY}',
+            'Content-Type': 'application/json',
+        }, params=params, json=json_body, timeout=10)
+        if resp.status_code == 200:
+            d = resp.json()
+            if d.get('code') == 200:
+                return d.get('data', {}) or {}
+    except:
+        pass
+    return {}
+
+def xxyy_query_token(chain, ca):
+    """查单个代币详情（MC/holders/KOL等）"""
+    return xxyy_get('/api/trade/open/api/query', {'ca': ca, 'chain': chain})
+
+def xxyy_get_kol_list(chain='sol'):
+    """获取XXYY KOL买入列表（字典格式：address -> kol_count）"""
+    data = xxyy_get('/api/trade/open/api/kol-buy-list', {'chain': chain})
+    result = {}
+    if isinstance(data, list):
+        for item in data:
+            mint = item.get('tokenMeta', {}).get('mint', '')
+            cnt = item.get('walletBuyCnt', 0)
+            if mint and cnt > 0:
+                result[mint.lower()] = cnt
+    return result
+
+def xxyy_get_tag_holder_list(chain='sol'):
+    """获取XXYY Tag Holder买入列表（字典格式：address -> insider_count）"""
+    data = xxyy_get('/api/trade/open/api/tag-holder-buy-list', {'chain': chain})
+    result = {}
+    if isinstance(data, list):
+        for item in data:
+            mint = item.get('tokenMeta', {}).get('mint', '')
+            cnt = item.get('walletBuyCnt', 0)
+            if mint and cnt > 0:
+                result[mint.lower()] = cnt
+    return result
+
 # ============================================================
 # 马斯克/川普关键词库（大小写不敏感）
 # ============================================================
@@ -120,6 +186,81 @@ MUSK_TRUMP_PATTERNS = [
     r'\bd\.?o\.?g\.?e\b',  # D.O.G.E变体
     r'\bx\s*ai\b', r'\bneuralink\b',
 ]
+
+# 叙事关键词翻译（中英对照）
+NARRATIVE_TRANSLATIONS = {
+    # 马斯克相关
+    'musk': '马斯克', 'elon': '马斯克', 'elonmusk': '马斯克',
+    'spacex': 'SpaceX', 'starship': '星舰', 'tesla': '特斯拉',
+    'cybertruck': '特斯拉卡车', 'roadster': '特斯拉跑车',
+    'neuralink': 'Neuralink', 'boring': 'Boring公司', 'hyperloop': '超级高铁',
+    'xai': 'xAI', 'grok': 'Grok',
+    'floki': 'Floki', 'shiba': '柴犬', 'doge': 'Doge', 'doge father': 'Doge之父', 'dogefather': 'Doge之父',
+    'technoking': '技术王', 'mars colony': '火星殖民地', 'mars': '火星',
+    # 川普相关
+    'trump': '川普', 'donald': '特朗普', 'maga': 'MAGA', 'potus': '美国总统',
+    'trump47': '川普47', 'melania': '梅拉尼娅', 'barron': '巴伦', 'ivanka': '伊万卡',
+    'dark maga': '暗黑MAGA', 'darkmaga': '暗黑MAGA', 'ultra maga': '终极MAGA',
+    'save america': '拯救美国', 'truth social': 'Truth社媒', 'covfefe': 'Covfefe',
+    'doge department': 'DOGE部门', 'd.o.g.e': 'D.O.G.E', 'government efficiency': '政府效率',
+    # 币安/CZ相关
+    'cz': 'CZ', 'changpeng': '赵长鹏', 'zhao': '赵长鹏', 'czb': 'CZ',
+    'binance': '币安', 'bnb': 'BNB', 'pancake': 'Pancake',
+    'pancakeswap': 'PancakeSwap', 'heyi': '何一', 'yi he': '何一',
+    'fourmeme': 'Four.meme', 'four meme': 'Four.meme', '4meme': '4meme',
+    # 名人/热点
+    'vitalik': 'V神', 'buterin': 'V神', 'satoshi': '中本聪',
+    'justin sun': '孙宇晨', 'sun yuchen': '孙宇晨', 'tron': '波场',
+    'saylor': 'MicroStrategy创始人', 'blackrock': '贝莱德',
+    'coinbase': 'Coinbase', 'etf': 'ETF', 'halving': '减半',
+    'lobster': '龙虾', 'mrbeast': 'MrBeast',
+    # 通用
+    'novel': '新叙事', 'heating': '热点',
+}
+
+def translate_description(text):
+    """对描述文本做关键词翻译（只替换英文关键词为中文，保留其他所有内容）"""
+    if not text:
+        return text
+    # 按单词边界替换
+    result = text
+    # 按长度降序排列key，避免短词优先匹配破坏长词
+    for kw in sorted(NARRATIVE_TRANSLATIONS.keys(), key=len, reverse=True):
+        cn = NARRATIVE_TRANSLATIONS[kw]
+        # 大小写敏感替换
+        pattern = re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE)
+        result = pattern.sub(f'{cn}({kw})', result)
+    return result
+
+
+def translate_narrative_tag(tag):
+    """
+    把英文叙事标签翻译成中文
+    规则：关键词翻译成中文，英文原文保留在括号里
+    例如：musk → 马斯克(musk)
+          马斯克/川普概念 (musk, doge) → 马斯克/川普概念 (马斯克(musk), Doge(doge))
+    """
+    if not tag:
+        return tag
+
+    # 翻译单个关键词，保留原文在括号
+    def _translate_word(word):
+        w = word.lower().strip('.,!?(){}[]')
+        if w in NARRATIVE_TRANSLATIONS:
+            cn = NARRATIVE_TRANSLATIONS[w]
+            if cn != word:
+                return f"{cn}({word})"
+        return word
+
+    # 分割：保留分隔符
+    parts = re.split(r'([,\s\(\)]+)', tag)
+    translated = []
+    for part in parts:
+        if re.match(r'^[\s,\(\)]+$', part):
+            translated.append(part)
+        else:
+            translated.append(_translate_word(part))
+    return ''.join(translated)
 
 # ============================================================
 # 币安/CZ关键词库
@@ -293,29 +434,37 @@ def save_flap_seen(data):
     with open(FLAP_SEEN_FILE, 'w') as f:
         json.dump(data, f)
 
-def tg_send(text, parse_mode='Markdown'):
+def tg_send(text, parse_mode='Markdown', reply_to_message_id=None):
     if not TG_TOKEN:
         log(f"[TG] No token, skip: {text[:80]}")
         return False
     try:
+        payload = {'chat_id': TG_CHAT_ID, 'text': text, 'parse_mode': parse_mode, 'disable_web_page_preview': True}
+        if reply_to_message_id:
+            payload['reply_to_message_id'] = reply_to_message_id
         resp = requests.post(
             f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-            json={'chat_id': TG_CHAT_ID, 'text': text, 'parse_mode': parse_mode},
+            json=payload,
             timeout=10
         )
         result = resp.json()
         if not result.get('ok'):
             # Markdown失败时降级到纯文本
             if 'can\'t parse' in str(result.get('description', '')).lower():
+                payload_clean = {'chat_id': TG_CHAT_ID, 'text': text, 'disable_web_page_preview': True}
+                if reply_to_message_id:
+                    payload_clean['reply_to_message_id'] = reply_to_message_id
                 resp = requests.post(
                     f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
-                    json={'chat_id': TG_CHAT_ID, 'text': text},
+                    json=payload_clean,
                     timeout=10
                 )
-            else:
+                result = resp.json()
+            if not result.get('ok'):
                 log(f"[TG] Error: {result.get('description', '')}")
                 return False
-        return True
+        # 成功发送时返回 message_id（int），方便调用方捕获
+        return result.get('result', {}).get('message_id', True)
     except Exception as e:
         log(f"[TG] Send error: {e}")
         return False
@@ -764,10 +913,34 @@ def fetch_sol_tokens():
 
 
 def fetch_new_tokens():
-    """从GMGN获取各链新币 + 多维度覆盖"""
+    """从GMGN+XXYY获取各链新币，XXYY补充KOL数据"""
     all_tokens = []
     seen_addrs = set()
-    
+
+    # 预先拉取XXYY KOL数据（所有链），合并到tokens里
+    xxyy_kol = {}
+    xxyy_tag = {}
+    if XXYY_API_KEY:
+        xxyy_kol = xxyy_get_kol_list('sol')
+        xxyy_tag = xxyy_get_tag_holder_list('sol')
+        time.sleep(0.3)
+        xxyy_kol_bsc = xxyy_get_kol_list('bsc')
+        xxyy_tag_bsc = xxyy_get_tag_holder_list('bsc')
+        xxyy_kol.update({k: v for k, v in xxyy_kol_bsc.items()})
+        xxyy_tag.update({k: v for k, v in xxyy_tag_bsc.items()})
+        log(f"[XXYY] kol买入列表: sol={len(xxyy_kol)}, bsc={len(xxyy_kol_bsc)}, tag买入列表: sol={len(xxyy_tag)}, bsc={len(xxyy_tag_bsc)}")
+    else:
+        log(f"[XXYY] XXYY_API_KEY 未设置，KOL过滤将失效（需设置环境变量 XXYY_API_KEY）")
+
+    def _merge_sm(token):
+        """用XXYY数据补充sm（KOL数），只用XXYY数据，不用GMGN的smart_degen_count"""
+        addr = token.get('address', '').lower()
+        kol = xxyy_kol.get(addr, 0)
+        tag = xxyy_tag.get(addr, 0)
+        # 只用XXYY的kol和tag，忽略GMGN的smart_degen_count
+        token['sm'] = max(kol, tag)
+        return token
+
     # SOL: 先拉 GMGN（有真实 holders），再补充 DexScreener（无 holders）
     sol_gmgn_urls = [
         f'https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h?orderby=open_timestamp&direction=desc&limit=100',
@@ -787,7 +960,7 @@ def fetch_new_tokens():
             age_ts = t.get('open_timestamp', 0)
             age_h = (time.time() - age_ts) / 3600 if age_ts > 0 else 999
             seen_addrs.add(addr)
-            all_tokens.append({
+            t_data = {
                 'address': addr,
                 'chain': 'sol',
                 'name': t.get('name', '?'),
@@ -796,14 +969,15 @@ def fetch_new_tokens():
                 'liq': liq,
                 'volume': t.get('volume', 0) or 0,
                 'holders': t.get('holder_count', 0) or 0,
-                'sm': t.get('smart_degen_count', 0) or 0,
+                'sm': 0,
                 'chg_1h': t.get('price_change_percent1h', 0) or 0,
                 'chg_24h': t.get('price_change_percent', 0) or 0,
                 'age_h': age_h,
                 'price': t.get('price', 0),
                 'buys_1h': t.get('buys', 0) or 0,
                 'sells_1h': t.get('sells', 0) or 0,
-            })
+            }
+            all_tokens.append(_merge_sm(t_data))
         time.sleep(0.3)
 
     # SOL DexScreener 兜底补充（GMGN 已有的地址会被 seen_addrs 过滤掉）
@@ -811,7 +985,7 @@ def fetch_new_tokens():
     for t in sol_ds_tokens:
         if t['address'] not in seen_addrs:
             seen_addrs.add(t['address'])
-            all_tokens.append(t)
+            all_tokens.append(_merge_sm(t))
     
     for chain in ['eth', 'bsc', 'base']:
         # 多维度拉数据，避免漏掉
@@ -844,7 +1018,7 @@ def fetch_new_tokens():
                 # 不限年龄 — 动量追踪核心逻辑：涨就推，不管新旧
                 
                 seen_addrs.add(addr)
-                all_tokens.append({
+                t_data = {
                     'address': addr,
                     'chain': chain,
                     'name': t.get('name', '?'),
@@ -853,14 +1027,15 @@ def fetch_new_tokens():
                     'liq': liq,
                     'volume': t.get('volume', 0) or 0,
                     'holders': t.get('holder_count', 0) or 0,
-                    'sm': t.get('smart_degen_count', 0) or 0,
+                    'sm': 0,
                     'chg_1h': t.get('price_change_percent1h', 0) or 0,
                     'chg_24h': t.get('price_change_percent', 0) or 0,
                     'age_h': age_h,
                     'price': t.get('price', 0),
                     'buys_1h': t.get('buys', 0) or 0,
                     'sells_1h': t.get('sells', 0) or 0,
-                })
+                }
+                all_tokens.append(_merge_sm(t_data))
             
             time.sleep(0.3)
     
@@ -1223,6 +1398,17 @@ def track_momentum(tokens):
         if pct_gain < 5:
             continue
         
+        # === 严格市值/币龄过滤 ===
+        age_h = token.get('age_h', 999)
+        if age_h < 1 and mc < 60000:
+            # 币龄<1小时 且 市值<60k：必须两轮总涨幅>50%
+            if pct_gain <= 50:
+                continue
+        elif age_h >= 1:
+            # 币龄>=1小时：市值必须>100k
+            if mc < 100000:
+                continue
+        
         # 信号计数：同一个币每次触发信号，计数+1
         push_info = MOMENTUM_PUSHED.get(addr, {'count': 0, 'last_ts': 0, 'last_mc': 0})
         
@@ -1235,6 +1421,12 @@ def track_momentum(tokens):
         push_info['last_mc'] = last_mc
         signal_count = push_info['count']
         
+        # KOL买入检测 — sm > 0
+        sm_count = token.get('sm', 0) or 0
+        if sm_count < MIN_KOL_COUNT:
+            log(f"[KOL过滤] {token.get('symbol')} sm={sm_count} < {MIN_KOL_COUNT}，跳过")
+            continue
+
         # 安全检查
         safety = check_token_safety(token['chain'], addr)
         if not safety.get('safe'):
@@ -1296,18 +1488,6 @@ def track_momentum(tokens):
         # 生成推送（gmgn info 追加到 format 之后）
         msg = format_momentum_alert(token, pct_gain, len(recent), vol_increasing, stars, narrative_tag, desc_info, signal_count)
 
-        # KOL / 聪明钱（用 rank 接口已有数据）
-        sm_count = token.get('sm', 0) or 0
-        total_holders = token.get('holders', 0) or 0
-        if sm_count > 0 or total_holders > 0:
-            lines = []
-            if sm_count > 0:
-                lines.append(f"聪明钱: {sm_count}")
-            if total_holders > 0:
-                lines.append(f"持有人: {total_holders:,}")
-            if lines:
-                msg += ' | '.join(lines) + '\n'
-
         alerts.append({'msg': msg, 'token': token, 'chain': token['chain'], 'pct_gain': pct_gain})
         MOMENTUM_PUSHED[addr] = push_info
 
@@ -1319,7 +1499,7 @@ def track_momentum(tokens):
                 'symbol': token['symbol'],
                 'chain': token['chain'],
                 'push_ts': now,
-                'init_mc': recent[0]['mc'],
+                'init_mc': last_mc,
                 'init_price': recent[0]['price'],
                 'init_holders': recent[0]['holders'],
                 'peak_mc': last_mc,
@@ -1329,6 +1509,7 @@ def track_momentum(tokens):
                 'report_count': 0,
                 'last_mid_push_ts': 0,
                 'last_mid_pct': 0,
+                'first_msg_id': None,  # 主循环发报后回填
             }
 
         log(f"[动量信号{signal_count}] {token['name']} ({token['symbol']}) on {token['chain']} — 连涨{len(recent)}轮 +{pct_gain:.1f}%")
@@ -1346,34 +1527,28 @@ def track_momentum(tokens):
 
 def format_momentum_alert(token, pct_gain, rounds, vol_up, stars, narrative_tag, desc_info=None, seen_count=0):
     """
-    动量推送 — 简洁专业风格：
-    1. 顶部一行：链 + 星级 + 连涨信息
-    2. 代币名 + Symbol
-    3. 核心数据（MC / 流动性 / 1h / 持有人）
-    4. 叙事标签 + 描述（如有）
-    5. 直达链接（仅GMGN）
+    动量推送 — HTML格式（Telegram parse_mode=HTML）
+    无链接预览，GMGN和推文链接仅作纯文本显示
     """
     chain_map = {'sol': 'SOL', 'eth': 'ETH', 'bsc': 'BSC', 'base': 'BASE'}
     ch = chain_map.get(token['chain'], token['chain'].upper())
 
-    chain_emoji = {'sol': '🔸', 'eth': '🔷', 'bsc': '🟡', 'base': '🔵'}.get(token['chain'], '●')
-    star_str = "⭐" * stars
-    vol_tag = "📊" if vol_up else ""
-
     # 顶部一行
-    top_line = f"{chain_emoji} {ch}  {star_str}  🚀连涨{rounds}轮 +{pct_gain:.1f}% {vol_tag}"
-    msg = top_line + "\n\n"
+    top_line = f"🔸 <b>[{ch}] 异动提醒 · 连涨 {rounds} 轮 (+{pct_gain:.1f}%)</b>"
 
+    # 代币名 + 推送次数 + 币龄
     name = token['name']
     sym = token['symbol']
-    msg += f"◈ {name}  ({sym})\n"
+    age_str = f"{token['age_h']:.1f}h"
+    push_line = f"📊 推送次数：{seen_count}次 | ⏳ 币龄：{age_str}h"
+    token_line = f"◈ <b>${sym}</b> | {name}\n{push_line}"
 
-    # 仅GMGN链接
+    # GMGN链接（无href，纯文本避免预览）
     addr = token['address']
     gmgn_url = (f"https://gmgn.ai/sol/token/{addr}"
                  if token['chain'] == 'sol'
                  else f"https://gmgn.ai/{token['chain']}/token/{addr}")
-    msg += f"📈 GMGN: {gmgn_url}\n\n"
+    gmgn_line = f"🔗 GMGN：{gmgn_url}"
 
     def fmt_k(v):
         if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
@@ -1382,43 +1557,50 @@ def format_momentum_alert(token, pct_gain, rounds, vol_up, stars, narrative_tag,
 
     mc_str = fmt_k(token['mc'])
     liq_str = fmt_k(token['liq'])
-    chg_str = f"{token['chg_1h']:+.1f}%"
+    chg_1h = token.get('chg_1h', 0)
+    chg_str = f"{chg_1h:+.1f}%"
     holders = token.get('holders', 0) or 0
     holders_str = f"{holders:,}" if holders else "—"
-    age_str = f"{token['age_h']:.1f}h"
+    sm_count = token.get('sm', 0) or 0
+    sm_str = str(sm_count) if sm_count > 0 else "—"
 
-    msg += f"市值 {mc_str}  ·  流动性 {liq_str}  ·  1h {chg_str}\n"
-    msg += f"持有人 {holders_str}  ·  币龄 {age_str}\n\n"
+    # 数据行
+    mc_line = f"💰 <b>市值：</b> <code>{mc_str}</code>"
+    liq_line = f"💧 <b>池子：</b> <code>{liq_str}</code> (1h {chg_str})"
+    sm_line = f"👑 <b>KOL人数：</b> <u><b>{sm_str}</b></u> 🔥 | 👥 <b>持有人：</b> {holders_str}"
 
-    # 叙事标签
+    # 叙事标签（翻译成中文，英文原文保留括号，去掉原有"叙事:"前缀避免重复）
+    narrative_line = ""
     if narrative_tag and narrative_tag not in ('无明确叙事',):
-        clean_tag = narrative_tag.replace('★', '⭐').replace('☆', '')
-        msg += f"🏷️ {clean_tag}\n\n"
+        clean_tag = narrative_tag.replace('★', '⭐').replace('☆', '').strip()
+        # 去掉原有的"叙事:"前缀
+        if clean_tag.startswith('叙事:') or clean_tag.startswith('叙事：'):
+            clean_tag = clean_tag.split(':', 1)[-1].split('：', 1)[-1].strip()
+        translated_tag = translate_narrative_tag(clean_tag)
+        narrative_line = f"🏷️ <b>叙事：</b> {translated_tag}"
 
-    # 故事描述
-    desc = (desc_info or {}).get('description', '')
-    if desc:
-        desc = desc.strip()
-        if len(desc) > 120:
-            desc = desc[:120] + '…'
-        msg += f"💬 {desc}\n\n"
-
-    # 社交链接
-    links = []
+    # 推文链接（无href，纯文本）
     twitter = (desc_info or {}).get('twitter', '')
-    telegram = (desc_info or {}).get('telegram', '')
-    website = (desc_info or {}).get('website', '')
-    if twitter:
-        links.append(f"𝕏 {twitter}")
-    if telegram:
-        links.append(f"💬 {telegram}")
-    if website:
-        web_short = website.replace('https://', '').replace('http://', '').split('/')[0]
-        links.append(f"🌐 {web_short}")
-    if links:
-        msg += '  ·  '.join(links) + "\n"
+    tweet_line = f"🐦 推文：{twitter}" if twitter else ""
 
-    return msg
+    # 组装
+    divider = "━━━━━━━━━━━━━━"
+    msg_parts = [
+        top_line,
+        divider,
+        token_line,
+        "",
+        mc_line,
+        liq_line,
+        sm_line,
+    ]
+    if narrative_line:
+        msg_parts.extend(["", narrative_line])
+    msg_parts.extend(["", gmgn_line])
+    if tweet_line:
+        msg_parts.append(tweet_line)
+
+    return "\n".join(msg_parts)
 
 def format_celebrity_alert(token, matched_kw, desc_info=None):
     """名人/推特热点推送"""
@@ -1460,7 +1642,15 @@ def scan_narratives():
     """主扫描函数"""
     conn = init_db()
     tokens = fetch_new_tokens()
-    
+
+    # 写入MC快照缓存（供sim_trade.py读取）
+    try:
+        mc_cache = [{"address": t["address"], "mc": t.get("mc", 0), "price": t.get("price", 0)} for t in tokens]
+        with open(os.path.expanduser("~/crypto-trading/momentum_tracker_cache.json"), "w") as f:
+            json.dump(mc_cache, f)
+    except Exception as e:
+        log(f"[MC缓存写入失败] {e}")
+
     log(f"扫描 {len(tokens)} 个新币...")
     
     # === 动量追踪 — 每轮更新所有币的快照，检测持续上涨 ===
@@ -1518,8 +1708,37 @@ def scan_narratives():
     for ma in momentum_alerts[:8]:  # 单轮最多推8个
         if ma.get('chain') not in ENABLED_CHAINS:
             continue
-        if tg_send(ma['msg']):
+        addr = ma['token']['address']
+        reply_id = PUSH_TRACKER.get(addr, {}).get('first_msg_id')
+        msg_id = tg_send(ma['msg'], parse_mode='HTML', reply_to_message_id=reply_id)
+        if msg_id:
             pushed += 1
+            # 写入模拟交易信号
+            try:
+                sig_file = os.path.expanduser("~/crypto-trading/sim_signals.json")
+                sig = {
+                    "address": addr,
+                    "name": ma['token'].get('name', ''),
+                    "symbol": ma['token'].get('symbol', ''),
+                    "chain": ma['token'].get('chain', 'sol'),
+                    "entry_mc": ma['token'].get('mc', 0),
+                    "entry_price": ma['token'].get('price', 0),
+                    "push_ts": now,
+                }
+                if os.path.exists(sig_file):
+                    with open(sig_file) as f:
+                        existing = json.load(f)
+                else:
+                    existing = []
+                existing.append(sig)
+                with open(sig_file, 'w') as f:
+                    json.dump(existing, f)
+            except Exception as e:
+                log(f"[信号写入失败] {e}")
+
+            # 首次推送：回填 first_msg_id
+            if addr in PUSH_TRACKER and not PUSH_TRACKER[addr].get('first_msg_id'):
+                PUSH_TRACKER[addr]['first_msg_id'] = msg_id
             time.sleep(1)  # 避免TG限流
 
     # === 信号跟踪：每轮更新峰值 + 中间汇报 ===
@@ -1564,8 +1783,10 @@ def check_signal_tracking(tokens_by_addr, force_summary=False):
                 record['peak_price'] = current_price
         record['last_check_ts'] = now
 
-    # === 30分钟中间检查：涨50%触发（跌不推）===
+    # === 30分钟中间检查：涨50%触发（跌不推）- 只推ENABLED_CHAINS ===
     for addr, record in list(PUSH_TRACKER.items()):
+        if record['chain'] not in ENABLED_CHAINS:
+            continue
         token = tokens_by_addr.get(addr)
         current_mc = token['mc'] if token else 0
         elapsed_min = (now - record['push_ts']) / 60
@@ -1593,7 +1814,8 @@ def check_signal_tracking(tokens_by_addr, force_summary=False):
                     f"{_fa(mc_change)}\n"
                     f"📈 GMGN: {gmgn_url}"
                 )
-                tg_send(msg)
+                reply_id = record.get('first_msg_id')
+                tg_send(msg, reply_to_message_id=reply_id)
                 record['report_count'] += 1
                 record['last_mid_push_ts'] = now
                 record['last_mid_pct'] = current_pct
@@ -1604,7 +1826,7 @@ def check_signal_tracking(tokens_by_addr, force_summary=False):
         LAST_SUMMARY_TS = now
 
         active = [(addr, r) for addr, r in PUSH_TRACKER.items()
-                  if now - r['push_ts'] < 86400]
+                  if r['chain'] in ENABLED_CHAINS and now - r['push_ts'] < 86400]
 
         if not active:
             tg_send("📊 2h信号汇总\n过去2小时无有效信号，继续监控中...")
@@ -1676,7 +1898,7 @@ def main():
     tg_send(
         "链上雷达 v1 已启动\n\n"
         "核心逻辑: 动量优先\n"
-        "连涨2轮+涨幅>5%才推送\n"
+        "连涨2轮+涨幅>5%+KOL≥1才推送\n"
         "叙事只做分类标签:\n"
         "★★★ 马斯克/川普 | 币安/CZ | FLAP有社区\n"
         "★★ 名人热点 | FLAP无社区 | 有叙事\n"
@@ -1702,7 +1924,8 @@ def main():
                     log(f"第{scan_count}轮: 无新信号 (累计推送{total_pushed})")
 
         except Exception as e:
-            log(f"扫描异常: {e}")
+            import traceback
+            log(f"扫描异常: {e}\n{traceback.format_exc()}")
 
         time.sleep(SCAN_INTERVAL)
 
