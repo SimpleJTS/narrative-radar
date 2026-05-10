@@ -90,7 +90,7 @@ GMGN_HEADERS = {
     'apikey': 'gmgn_9837755ef6632402b4947b5e21ad50eb',
 }
 
-XXYY_API_KEY = os.environ.get('XXYY_API_KEY', '')
+XXYY_API_KEY = os.environ.get('XXYY_API_KEY', 'xxyy_ak_4d3b66c1a6ff43a18f1d3d')
 XXYY_BASE = 'https://www.xxyy.io'
 
 def xxyy_get(endpoint, params=None):
