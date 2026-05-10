@@ -34,7 +34,7 @@ FLAP_SEEN_FILE = os.path.join(DATA_DIR, "flap_seen.json")
 SCAN_INTERVAL = 10  # 10秒（快速验证模式）
 
 # 推送链过滤（测试用）
-ENABLED_CHAINS = ['sol']  # 只推SOL，测试完成后把 'eth','bsc','base' 加回来
+ENABLED_CHAINS = ['sol', 'eth']  # 推SOL+ETH，测试完成后把 'bsc','base' 加回来
 
 # 动量追踪器 — 内存中记录每个币的价格/市值快照
 # {address: [{'ts': timestamp, 'mc': market_cap, 'vol': volume, 'price': price}, ...]}
@@ -926,9 +926,14 @@ def fetch_new_tokens():
         time.sleep(0.3)
         xxyy_kol_bsc = xxyy_get_kol_list('bsc')
         xxyy_tag_bsc = xxyy_get_tag_holder_list('bsc')
+        time.sleep(0.3)
+        xxyy_kol_eth = xxyy_get_kol_list('eth')
+        xxyy_tag_eth = xxyy_get_tag_holder_list('eth')
         xxyy_kol.update({k: v for k, v in xxyy_kol_bsc.items()})
         xxyy_tag.update({k: v for k, v in xxyy_tag_bsc.items()})
-        log(f"[XXYY] kol买入列表: sol={len(xxyy_kol)}, bsc={len(xxyy_kol_bsc)}, tag买入列表: sol={len(xxyy_tag)}, bsc={len(xxyy_tag_bsc)}")
+        xxyy_kol.update({k: v for k, v in xxyy_kol_eth.items()})
+        xxyy_tag.update({k: v for k, v in xxyy_tag_eth.items()})
+        log(f"[XXYY] kol买入列表: sol={len(xxyy_kol)}, bsc={len(xxyy_kol_bsc)}, eth={len(xxyy_kol_eth)}, tag买入列表: sol={len(xxyy_tag)}, bsc={len(xxyy_tag_bsc)}, eth={len(xxyy_tag_eth)}")
     else:
         log(f"[XXYY] XXYY_API_KEY 未设置，KOL过滤将失效（需设置环境变量 XXYY_API_KEY）")
 
