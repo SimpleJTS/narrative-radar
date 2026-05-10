@@ -992,7 +992,8 @@ def fetch_new_tokens():
             seen_addrs.add(t['address'])
             all_tokens.append(_merge_sm(t))
     
-    for chain in ['eth', 'bsc', 'base']:
+    # GMGN ETH/BSC/BASE — GMGN对ETH返回403，改用DexScreener补充
+    for chain in ['bsc', 'base']:
         # 多维度拉数据，避免漏掉
         urls = [
             # 按创建时间 — 最新的币
@@ -1020,8 +1021,6 @@ def fetch_new_tokens():
                 age_ts = t.get('open_timestamp', 0)
                 age_h = (time.time() - age_ts) / 3600 if age_ts > 0 else 999
                 
-                # 不限年龄 — 动量追踪核心逻辑：涨就推，不管新旧
-                
                 seen_addrs.add(addr)
                 t_data = {
                     'address': addr,
@@ -1041,8 +1040,52 @@ def fetch_new_tokens():
                     'sells_1h': t.get('sells', 0) or 0,
                 }
                 all_tokens.append(_merge_sm(t_data))
-            
             time.sleep(0.3)
+
+    # ETH: GMGN返回403，改用DexScreener补充
+    try:
+        ds_resp = requests.get(
+            'https://api.dexscreener.com/latest/dex/search?q=eth&limit=100&chainId=ethereum',
+            headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'},
+            timeout=15
+        )
+        if ds_resp.status_code == 200:
+            ds_data = ds_resp.json()
+            for p in ds_data.get('pairs', []):
+                if p.get('chainId') != 'ethereum':
+                    continue
+                addr = p.get('baseToken', {}).get('address', '')
+                if not addr or addr.lower() in seen_addrs or addr == '0x0000000000000000000000000000000000000000':
+                    continue
+                mc = float(p.get('marketCap') or p.get('fdv') or 0)
+                liq = float(p.get('liquidity', {}).get('usd', 0) or 0)
+                if mc < 1000 or liq < 500 or mc > 10000000:
+                    continue
+                age_ts = p.get('pairCreatedAt', 0)
+                age_h = (time.time() - age_ts / 1000) / 3600 if age_ts > 0 else 999
+                price_chg = p.get('priceChange', {})
+                seen_addrs.add(addr.lower())
+                t_data = {
+                    'address': addr.lower(),
+                    'chain': 'eth',
+                    'name': p.get('baseToken', {}).get('name', '?'),
+                    'symbol': p.get('baseToken', {}).get('symbol', '?'),
+                    'mc': mc,
+                    'liq': liq,
+                    'volume': float(p.get('volume', {}).get('h1', 0) or 0),
+                    'holders': 0,
+                    'sm': 0,
+                    'chg_1h': float(price_chg.get('h1', 0) or 0),
+                    'chg_24h': float(price_chg.get('h24', 0) or 0),
+                    'age_h': age_h,
+                    'price': float(p.get('priceUsd', 0) or 0),
+                    'buys_1h': 0,
+                    'sells_1h': 0,
+                }
+                all_tokens.append(_merge_sm(t_data))
+            log(f"[DexScreener] ETH补充: {len(ds_data.get('pairs', []))} 个交易对")
+    except Exception as e:
+        log(f"[DexScreener] ETH补充失败: {e}")
     
     return all_tokens
 
@@ -1426,9 +1469,9 @@ def track_momentum(tokens):
         push_info['last_mc'] = last_mc
         signal_count = push_info['count']
         
-        # KOL买入检测 — sm > 0
+        # KOL买入检测 — 有XXYY KOL数据时才过滤，否则跳过（避免sm=0全被误杀）
         sm_count = token.get('sm', 0) or 0
-        if sm_count < MIN_KOL_COUNT:
+        if XXYY_API_KEY and sm_count < MIN_KOL_COUNT:
             log(f"[KOL过滤] {token.get('symbol')} sm={sm_count} < {MIN_KOL_COUNT}，跳过")
             continue
 
@@ -1646,6 +1689,7 @@ def format_celebrity_alert(token, matched_kw, desc_info=None):
 def scan_narratives():
     """主扫描函数"""
     conn = init_db()
+    now = time.time()
     tokens = fetch_new_tokens()
 
     # 写入MC快照缓存（供sim_trade.py读取）
@@ -1720,7 +1764,7 @@ def scan_narratives():
             pushed += 1
             # 写入模拟交易信号
             try:
-                sig_file = os.path.expanduser("~/crypto-trading/sim_signals.json")
+                sig_file = "/root/crypto-trading/sim_signals.json"
                 sig = {
                     "address": addr,
                     "name": ma['token'].get('name', ''),
